@@ -59,7 +59,10 @@ Stored outputs:
 
 ### B) Cell-type-adjusted stickiness (recommended for ranking)
 
-Backed by `celltype_adjusted_stickiness.py`.
+Backed by `celltype_adjusted_stickiness.py` and exposed via:
+
+- `stickiness(...)` (public API)
+- `stickiness_diagnostics(...)` (sanity checks)
 
 Implemented features:
 
@@ -82,7 +85,9 @@ Implemented features:
 
 Stored outputs:
 
-- `adata.layers["sticky_resid"]` (if `residual_layer` is set)
+- `adata.varm["stickiness"]` (structured per-gene results)
+- `adata.uns["stickiness"]` (run parameters)
+- `adata.layers["stickiness_resid"]` (if `store_residuals=True`)
 - DataFrame `ctas_df` with ranking/statistical/diagnostic columns
 
 ## 3) Key Data Requirements
@@ -98,3 +103,4 @@ Stored outputs:
 - The notebook reloads modules in-place (`importlib.reload(...)`) to avoid stale imports during iterative development.
 - For the cell-type-adjusted permutation null, `n_perm=200` is a good default; increase for more stable p-values.
 - If runtime is high, reduce genes, reduce `n_perm`, or tighten filtering thresholds before ranking.
+- For quick QA outside notebooks, run `python sanity_check_stickiness.py <data.h5ad>`.

@@ -1,5 +1,7 @@
 # NeighborNorm
 
+![NeighborNorm logo](assets/logo.png)
+
 Spatial sticky-gene analysis utilities for AnnData, with support for:
 
 - sample-aware spatial neighbor handling
@@ -124,22 +126,23 @@ spatial smoothness scoring, then computes a conditional permutation null.
 
 ```python
 from celltype_adjusted_stickiness import (
-    compute_celltype_adjusted_stickiness,
+    stickiness,
     stickiness_diagnostics,
 )
 
-df = compute_celltype_adjusted_stickiness(
+df = stickiness(
     adata,
     layer="counts" if "counts" in adata.layers else None,
     cell_type_key="cell_type",
     total_counts_key="total_counts",
     connectivities_key="connectivities",
+    key_added="stickiness",
     n_perm=200,
     random_state=0,
-    min_cells=30,
-    umi_n_bins=4,
-    residual_layer="sticky_resid",
-    compute_within_ct=True,
+    compute_within_cell_type=True,
+    min_cells_per_type=50,
+    store_residuals=False,
+    copy=False,
 )
 
 top = df.sort_values("z", ascending=False).head(30)
@@ -151,12 +154,14 @@ Key columns in returned DataFrame:
 - `gene`
 - `stickiness_raw` / `stickiness_resid`
 - `null_mean`, `null_sd`, `z`, `pval`, `qval`
-- optional `stickiness_withinCT_mean`, `stickiness_withinCT_max`
+- optional `withinCT_mean`, `withinCT_max`
 - diagnostics: `detection_rate`, `stickiness_naive`, `rank_naive`, `rank_resid`, `rank_delta`
 
-Also writes residuals to:
+Stored in AnnData:
 
-- `adata.layers["sticky_resid"]` (if `residual_layer` is not `None`)
+- `adata.varm["stickiness"]` (structured array of per-gene stats)
+- `adata.uns["stickiness"]` (run parameters)
+- optional `adata.layers["stickiness_resid"]` when `store_residuals=True`
 
 ## Notebook
 
@@ -169,3 +174,16 @@ It includes:
 
 Detailed notebook instructions are in `notebooks/README.md`.
 
+## Sanity Check Script
+
+Run a quick post-fit sanity check with:
+
+```bash
+python sanity_check_stickiness.py /path/to/data.h5ad --layer counts --markers COL4A1,MBP,GFAP
+```
+
+The script reports:
+
+- top genes by adjusted z-score
+- detection-rate correlation before vs after adjustment
+- marker rank shifts (`rank_delta`)

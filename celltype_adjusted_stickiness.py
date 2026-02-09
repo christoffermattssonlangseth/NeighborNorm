@@ -22,7 +22,7 @@ Only numpy/scipy/pandas are required.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -196,6 +196,38 @@ def compute_celltype_residuals(
         design_columns=design_cols,
         log_total_counts=log_total,
         cell_type=cell_type,
+    )
+
+
+def _residualize_by_cell_type(
+    adata,
+    layer: Optional[str] = None,
+    cell_type_key: str = "cell_type",
+    total_counts_key: str = "total_counts",
+    key_added: str = "stickiness",
+    store_residuals: bool = False,
+    scale_factor: float = 1e4,
+    chunk_size: int = 512,
+    dtype=np.float32,
+) -> ResidualizationResult:
+    """Residualize expression by cell type and log library size.
+
+    Residualization model (per gene):
+        y_g ~ 1 + cell_type + log_total_counts
+
+    where:
+        y = log1p(scale_factor * counts / total_counts)
+    """
+    out_layer = f"{key_added}_resid" if store_residuals else None
+    return compute_celltype_residuals(
+        adata=adata,
+        layer=layer,
+        cell_type_key=cell_type_key,
+        total_counts_key=total_counts_key,
+        out_layer=out_layer,
+        scale_factor=scale_factor,
+        chunk_size=chunk_size,
+        dtype=dtype,
     )
 
 
@@ -507,6 +539,170 @@ def stickiness_diagnostics(
     return out
 
 
+def stickiness(
+    adata,
+    layer: Optional[str] = None,
+    cell_type_key: str = "cell_type",
+    total_counts_key: str = "total_counts",
+    connectivities_key: str = "connectivities",
+    key_added: str = "stickiness",
+    n_perm: int = 200,
+    random_state: Optional[int] = 0,
+    compute_within_cell_type: bool = True,
+    min_cells_per_type: int = 50,
+    store_residuals: bool = False,
+    copy: bool = False,
+    eps: float = 1e-8,
+) -> pd.DataFrame | Tuple[pd.DataFrame, object]:
+    """Compute cell-type-adjusted spatial stickiness.
+
+    Parameters
+    ----------
+    adata
+        AnnData object with expression, graph, and metadata.
+    layer
+        Input layer name. If None, uses `adata.X`.
+    cell_type_key
+        `adata.obs` key with cell-type labels.
+    total_counts_key
+        `adata.obs` key with per-cell library sizes.
+    connectivities_key
+        `adata.obsp` key for spatial connectivities (sparse graph).
+    key_added
+        Key prefix used for AnnData storage.
+    n_perm
+        Number of conditional permutations. Set to `0` to skip null calibration.
+    random_state
+        Seed for permutation RNG.
+    compute_within_cell_type
+        If True, compute within-cell-type aggregated stickiness columns.
+    min_cells_per_type
+        Minimum cells per cell type for within-cell-type stickiness.
+    store_residuals
+        If True, store residuals in `adata.layers[f"{key_added}_resid"]`.
+    copy
+        If True, compute on a copied AnnData and return `(results_df, adata_copy)`.
+    eps
+        Numerical stability constant.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Gene-level results (always returned). If `copy=True`, returns
+        `(results_df, adata_copy)`.
+    """
+    if n_perm < 0:
+        raise ValueError("n_perm must be >= 0.")
+    if min_cells_per_type <= 0:
+        raise ValueError("min_cells_per_type must be > 0.")
+
+    adata_work = adata.copy() if copy else adata
+
+    resid_res = _residualize_by_cell_type(
+        adata=adata_work,
+        layer=layer,
+        cell_type_key=cell_type_key,
+        total_counts_key=total_counts_key,
+        key_added=key_added,
+        store_residuals=store_residuals,
+        scale_factor=1e4,
+        chunk_size=512,
+    )
+    R = resid_res.residuals
+    Y = resid_res.normalized_log_expr
+    W = _get_connectivities(adata_work, connectivities_key=connectivities_key)
+
+    # Adjusted stickiness is the metric on residuals.
+    score_resid, _, _ = _laplacian_stickiness(R, W=W, eps=eps)
+    df = pd.DataFrame(
+        {
+            "gene": adata_work.var_names.astype(str),
+            "stickiness_resid": score_resid,
+        }
+    )
+
+    # Unadjusted score for diagnostics/rank-shift checks.
+    score_naive, _, _ = _laplacian_stickiness(Y, W=W, eps=eps)
+    df["stickiness_naive"] = score_naive
+
+    # Conditional permutation null (within-cell-type shuffling).
+    if n_perm > 0:
+        null_df = permutation_null_stickiness(
+            residuals=R,
+            observed_scores=score_resid,
+            W=W,
+            cell_type=resid_res.cell_type,
+            log_total_counts=resid_res.log_total_counts,
+            n_perm=n_perm,
+            random_state=random_state,
+            umi_n_bins=None,
+            eps=eps,
+        )
+    else:
+        n_genes = adata_work.n_vars
+        null_df = pd.DataFrame(
+            {
+                "null_mean": np.full(n_genes, np.nan),
+                "null_sd": np.full(n_genes, np.nan),
+                "z": np.full(n_genes, np.nan),
+                "pval": np.full(n_genes, np.nan),
+                "qval": np.full(n_genes, np.nan),
+            }
+        )
+    df = pd.concat([df, null_df], axis=1)
+
+    # Optional within-cell-type stickiness aggregation.
+    if compute_within_cell_type:
+        within_df = within_celltype_stickiness(
+            residuals=R,
+            W=W,
+            cell_type=resid_res.cell_type,
+            min_cells=min_cells_per_type,
+            eps=eps,
+        ).rename(
+            columns={
+                "stickiness_withinCT_mean": "withinCT_mean",
+                "stickiness_withinCT_max": "withinCT_max",
+            }
+        )
+        df = pd.concat([df, within_df], axis=1)
+
+    # Diagnostics-ready columns.
+    mat_in = _get_matrix(adata_work, layer=layer)
+    if sparse.issparse(mat_in):
+        detect = np.asarray((mat_in > 0).sum(axis=0)).ravel() / max(1, adata_work.n_obs)
+    else:
+        detect = np.mean(np.asarray(mat_in) > 0, axis=0).ravel()
+    df["detection_rate"] = np.asarray(detect, dtype=np.float64)
+    df["rank_naive"] = _rank_desc(df["stickiness_naive"].to_numpy())
+    df["rank_resid"] = _rank_desc(df["stickiness_resid"].to_numpy())
+    df["rank_delta"] = df["rank_resid"] - df["rank_naive"]
+
+    # Store results in AnnData (`varm` + `uns`) with fixed gene order.
+    ordered = df.set_index("gene").loc[adata_work.var_names.astype(str)]
+    adata_work.varm[key_added] = ordered.to_records(index=False)
+    adata_work.uns[key_added] = {
+        "layer": layer,
+        "cell_type_key": cell_type_key,
+        "total_counts_key": total_counts_key,
+        "connectivities_key": connectivities_key,
+        "key_added": key_added,
+        "n_perm": int(n_perm),
+        "random_state": random_state,
+        "compute_within_cell_type": bool(compute_within_cell_type),
+        "min_cells_per_type": int(min_cells_per_type),
+        "store_residuals": bool(store_residuals),
+        "eps": float(eps),
+        "scale_factor": float(1e4),
+        "chunk_size": int(512),
+        "columns": list(ordered.columns),
+    }
+
+    if copy:
+        return df, adata_work
+    return df
+
+
 def compute_celltype_adjusted_stickiness(
     adata,
     layer: Optional[str] = None,
@@ -523,115 +719,31 @@ def compute_celltype_adjusted_stickiness(
     residual_layer: Optional[str] = "sticky_resid",
     compute_within_ct: bool = True,
 ) -> pd.DataFrame:
-    """Compute cell-type-adjusted stickiness ranking.
-
-    This is the main entry point.
-
-    Parameters
-    ----------
-    adata
-        AnnData object with expression, graph, and metadata.
-    layer
-        Input layer name. If None, uses `adata.X`.
-    cell_type_key
-        `adata.obs` key with cell-type labels.
-    total_counts_key
-        `adata.obs` key with per-cell library sizes.
-    connectivities_key
-        `adata.obsp` key for spatial connectivities (sparse graph).
-    n_perm
-        Number of conditional permutations.
-    random_state
-        Seed for permutation RNG.
-    min_cells
-        Minimum cells per cell type for within-cell-type stickiness.
-    eps
-        Numerical stability constant.
-    umi_n_bins
-        Optional number of bins for within-cell-type shuffling by UMI.
-    scale_factor
-        Scale factor for count normalization before log1p.
-    chunk_size
-        Genes per block in residualization least-squares.
-    residual_layer
-        If not None, store residual matrix in `adata.layers[residual_layer]`.
-    compute_within_ct
-        If True, compute within-cell-type aggregated stickiness columns.
-
-    Returns
-    -------
-    pandas.DataFrame
-        Columns include:
-        - gene
-        - stickiness_raw
-        - stickiness_resid
-        - null_mean, null_sd, z, pval, qval
-        - stickiness_withinCT_mean, stickiness_withinCT_max (optional)
-        - diagnostics helper columns (detection_rate, stickiness_naive, ranks)
-    """
-    resid_res = compute_celltype_residuals(
+    """Backward-compatible wrapper around :func:`stickiness`."""
+    _ = umi_n_bins  # kept for backward compatibility in caller signatures
+    store_residuals = residual_layer is not None
+    res = stickiness(
         adata=adata,
         layer=layer,
         cell_type_key=cell_type_key,
         total_counts_key=total_counts_key,
-        out_layer=residual_layer,
-        scale_factor=scale_factor,
-        chunk_size=chunk_size,
-    )
-    R = resid_res.residuals
-    Y = resid_res.normalized_log_expr
-    W = _get_connectivities(adata, connectivities_key=connectivities_key)
-
-    # Residual-based stickiness.
-    score_resid, _, _ = _laplacian_stickiness(R, W=W, eps=eps)
-    df = pd.DataFrame({"gene": adata.var_names.astype(str), "stickiness_raw": score_resid})
-    df["stickiness_resid"] = df["stickiness_raw"]
-
-    # Naive stickiness on normalized expression (for diagnostics/comparison).
-    score_naive, _, _ = _laplacian_stickiness(Y, W=W, eps=eps)
-    df["stickiness_naive"] = score_naive
-
-    # Conditional permutation null.
-    null_df = permutation_null_stickiness(
-        residuals=R,
-        observed_scores=score_resid,
-        W=W,
-        cell_type=resid_res.cell_type,
-        log_total_counts=resid_res.log_total_counts,
+        connectivities_key=connectivities_key,
+        key_added="stickiness",
         n_perm=n_perm,
         random_state=random_state,
-        umi_n_bins=umi_n_bins,
+        compute_within_cell_type=compute_within_ct,
+        min_cells_per_type=min_cells,
+        store_residuals=store_residuals,
+        copy=False,
         eps=eps,
     )
-    df = pd.concat([df, null_df], axis=1)
-
-    # Optional within-cell-type stickiness aggregation.
-    if compute_within_ct:
-        within_df = within_celltype_stickiness(
-            residuals=R,
-            W=W,
-            cell_type=resid_res.cell_type,
-            min_cells=min_cells,
-            eps=eps,
-        )
-        df = pd.concat([df, within_df], axis=1)
-
-    # Diagnostics-ready columns.
-    mat_in = _get_matrix(adata, layer=layer)
-    if sparse.issparse(mat_in):
-        detect = np.asarray((mat_in > 0).sum(axis=0)).ravel() / max(1, adata.n_obs)
-    else:
-        detect = np.mean(np.asarray(mat_in) > 0, axis=0).ravel()
-    df["detection_rate"] = np.asarray(detect, dtype=np.float64)
-    df["rank_naive"] = _rank_desc(df["stickiness_naive"].to_numpy())
-    df["rank_resid"] = _rank_desc(df["stickiness_resid"].to_numpy())
-    df["rank_delta"] = df["rank_resid"] - df["rank_naive"]
-
-    return df
+    if store_residuals and residual_layer != "stickiness_resid":
+        adata.layers[residual_layer] = adata.layers["stickiness_resid"]
+    return res
 
 
 if __name__ == "__main__":
     # Example usage:
-    # df = compute_celltype_adjusted_stickiness(adata, n_perm=200)
+    # df = stickiness(adata, n_perm=200, key_added="stickiness")
     # df.sort_values("z", ascending=False).head(30)
     pass
