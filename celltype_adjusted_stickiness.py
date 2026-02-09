@@ -116,6 +116,23 @@ def _to_dense_gene_block(mat, start: int, end: int) -> np.ndarray:
     return np.asarray(mat[:, start:end], dtype=np.float64)
 
 
+def _progress_iter(
+    iterable,
+    enabled: bool = False,
+    desc: Optional[str] = None,
+    total: Optional[int] = None,
+):
+    """Wrap an iterable with tqdm progress bar when available."""
+    if not enabled:
+        return iterable
+    try:
+        from tqdm.auto import tqdm  # type: ignore
+
+        return tqdm(iterable, desc=desc, total=total)
+    except Exception:
+        return iterable
+
+
 def compute_celltype_residuals(
     adata,
     layer: Optional[str] = None,
@@ -125,6 +142,7 @@ def compute_celltype_residuals(
     scale_factor: float = 1e4,
     chunk_size: int = 512,
     dtype=np.float32,
+    show_progress: bool = False,
 ) -> ResidualizationResult:
     """Residualize gene expression for cell type and library size.
 
@@ -179,7 +197,13 @@ def compute_celltype_residuals(
     resid = np.empty((n_cells, n_genes), dtype=dtype)
 
     # Solve all genes in chunks: beta = argmin ||X beta - Y||_2
-    for start in range(0, n_genes, chunk_size):
+    starts = range(0, n_genes, chunk_size)
+    for start in _progress_iter(
+        starts,
+        enabled=show_progress,
+        desc="Residualizing genes",
+        total=int(np.ceil(n_genes / chunk_size)),
+    ):
         end = min(start + chunk_size, n_genes)
         y_block = _to_dense_gene_block(y, start, end)
         beta, *_ = np.linalg.lstsq(X, y_block, rcond=None)
@@ -209,6 +233,7 @@ def _residualize_by_cell_type(
     scale_factor: float = 1e4,
     chunk_size: int = 512,
     dtype=np.float32,
+    show_progress: bool = False,
 ) -> ResidualizationResult:
     """Residualize expression by cell type and log library size.
 
@@ -228,6 +253,7 @@ def _residualize_by_cell_type(
         scale_factor=scale_factor,
         chunk_size=chunk_size,
         dtype=dtype,
+        show_progress=show_progress,
     )
 
 
@@ -366,6 +392,7 @@ def permutation_null_stickiness(
     random_state: Optional[int] = 0,
     umi_n_bins: Optional[int] = None,
     eps: float = 1e-12,
+    show_progress: bool = False,
 ) -> pd.DataFrame:
     """Conditional permutation null for residual-based stickiness.
 
@@ -390,7 +417,13 @@ def permutation_null_stickiness(
     ge_count = np.zeros(n_genes, dtype=np.int64)
     obs = np.asarray(observed_scores, dtype=np.float64)
 
-    for _ in range(int(n_perm)):
+    perm_iters = range(int(n_perm))
+    for _ in _progress_iter(
+        perm_iters,
+        enabled=show_progress,
+        desc="Permutation null",
+        total=int(n_perm),
+    ):
         perm_idx = _permute_within_groups(n_cells=n_cells, groups=groups, rng=rng)
         perm_scores, _, _ = _laplacian_stickiness(residuals[perm_idx, :], W=W, eps=eps)
 
@@ -553,6 +586,7 @@ def stickiness(
     store_residuals: bool = False,
     copy: bool = False,
     eps: float = 1e-8,
+    show_progress: bool = False,
 ) -> pd.DataFrame | Tuple[pd.DataFrame, object]:
     """Compute cell-type-adjusted spatial stickiness.
 
@@ -584,6 +618,9 @@ def stickiness(
         If True, compute on a copied AnnData and return `(results_df, adata_copy)`.
     eps
         Numerical stability constant.
+    show_progress
+        If True, show tqdm-like progress bars for residualization and permutations
+        when `tqdm` is available.
 
     Returns
     -------
@@ -607,6 +644,7 @@ def stickiness(
         store_residuals=store_residuals,
         scale_factor=1e4,
         chunk_size=512,
+        show_progress=show_progress,
     )
     R = resid_res.residuals
     Y = resid_res.normalized_log_expr
@@ -633,11 +671,12 @@ def stickiness(
             W=W,
             cell_type=resid_res.cell_type,
             log_total_counts=resid_res.log_total_counts,
-            n_perm=n_perm,
-            random_state=random_state,
-            umi_n_bins=None,
-            eps=eps,
-        )
+                n_perm=n_perm,
+                random_state=random_state,
+                umi_n_bins=None,
+                eps=eps,
+                show_progress=show_progress,
+            )
     else:
         n_genes = adata_work.n_vars
         null_df = pd.DataFrame(
@@ -695,6 +734,7 @@ def stickiness(
         "eps": float(eps),
         "scale_factor": float(1e4),
         "chunk_size": int(512),
+        "show_progress": bool(show_progress),
         "columns": list(ordered.columns),
     }
 
@@ -718,6 +758,7 @@ def compute_celltype_adjusted_stickiness(
     chunk_size: int = 512,
     residual_layer: Optional[str] = "sticky_resid",
     compute_within_ct: bool = True,
+    show_progress: bool = False,
 ) -> pd.DataFrame:
     """Backward-compatible wrapper around :func:`stickiness`."""
     _ = umi_n_bins  # kept for backward compatibility in caller signatures
@@ -736,6 +777,7 @@ def compute_celltype_adjusted_stickiness(
         store_residuals=store_residuals,
         copy=False,
         eps=eps,
+        show_progress=show_progress,
     )
     if store_residuals and residual_layer != "stickiness_resid":
         adata.layers[residual_layer] = adata.layers["stickiness_resid"]

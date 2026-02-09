@@ -103,4 +103,5 @@ Stored outputs:
 - The notebook reloads modules in-place (`importlib.reload(...)`) to avoid stale imports during iterative development.
 - For the cell-type-adjusted permutation null, `n_perm=200` is a good default; increase for more stable p-values.
 - If runtime is high, reduce genes, reduce `n_perm`, or tighten filtering thresholds before ranking.
+- Set `show_progress=True` in `stickiness(...)` for tqdm-style status bars (if `tqdm` is available).
 - For quick QA outside notebooks, run `python sanity_check_stickiness.py <data.h5ad>`.

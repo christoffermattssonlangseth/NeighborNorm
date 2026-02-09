@@ -143,6 +143,7 @@ df = stickiness(
     min_cells_per_type=50,
     store_residuals=False,
     copy=False,
+    show_progress=True,  # tqdm-style progress if tqdm is installed
 )
 
 top = df.sort_values("z", ascending=False).head(30)
