@@ -1,0 +1,8 @@
+jupyterlab
+ipykernel
+numpy
+pandas
+scipy
+matplotlib
+anndata
+scanpy
