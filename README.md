@@ -8,6 +8,7 @@ Spatial sticky-gene analysis utilities for AnnData, with support for:
 - automatic sticky-gene discovery
 - correction feature generation for selected genes
 - cell-type-adjusted stickiness ranking with permutation-based significance
+- gene-level leakage / mis-segmentation scoring
 
 ## Repository Structure
 
@@ -15,6 +16,10 @@ Spatial sticky-gene analysis utilities for AnnData, with support for:
   Spatial sticky-gene discovery, correction features, and plotting helpers.
 - `celltype_adjusted_stickiness.py`
   Cell-type-adjusted residual stickiness ranking with conditional permutation null.
+- `leakage_score.py`
+  Gene-level leakage/mis-segmentation metrics and combined leakage score.
+- `tl.py`
+  Tool-style API facade exposing `tl.stickiness` and `tl.leakage_score`.
 - `notebooks/spatial-sticky-gene-corrections.ipynb`
   End-to-end interactive workflow.
 - `notebooks/README.md`
@@ -164,6 +169,52 @@ Stored in AnnData:
 - `adata.uns["stickiness"]` (run parameters)
 - optional `adata.layers["stickiness_resid"]` when `store_residuals=True`
 
+## Workflow C: Leakage / Mis-Segmentation Scoring
+
+Main modules: `leakage_score.py` and `tl.py`
+
+This workflow scores genes that show broad low-count spillover outside expected
+cell types, anchored to a source cell type for each gene. It is not a spatial
+smoothness metric.
+
+```python
+import tl
+
+df = tl.leakage_score(
+    adata,
+    layer="counts" if "counts" in adata.layers else None,
+    cell_type_key="cell_type",
+    key_added="leakage",
+    specificity_thresh=0.75,
+    source_mass_cover=0.95,
+    max_sources=1,
+    low_count_max=2,
+    alpha=2.0,
+    pr0=0.02,
+    sigma=0.8,
+    connectivities_key="connectivities",
+)
+df.head(30)
+```
+
+Key columns in returned DataFrame:
+
+- `gene`
+- `top1_ct`, `top1_frac`, `sources`
+- `off_type_frac`
+- `spray_off`, `spray_delta`
+- `presence_ratio`
+- `pr_score`
+- `near_enrichment`
+- optional `mean_ratio`
+- `leakage_score`
+- `rank`
+
+Stored in AnnData:
+
+- `adata.varm["leakage"]`
+- `adata.uns["leakage"]`
+
 ## Notebook
 
 Use `notebooks/spatial-sticky-gene-corrections.ipynb` for an end-to-end run.
@@ -188,3 +239,15 @@ The script reports:
 - top genes by adjusted z-score
 - detection-rate correlation before vs after adjustment
 - marker rank shifts (`rank_delta`)
+
+Leakage sanity check:
+
+```bash
+python sanity_check_leakage.py /path/to/data.h5ad --layer counts --markers GFAP,MBP
+```
+
+The script reports:
+
+- top genes by `leakage_score` with directional columns
+- marker ranks for GFAP/MBP/PLP1/AQP4
+- housekeeping and high-`presence_ratio` checks in top-ranked genes

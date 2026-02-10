@@ -27,9 +27,13 @@ jupyter lab
 
 Open `notebooks/spatial-sticky-gene-corrections.ipynb`, set `DATA_PATH`, then run cells top-to-bottom.
 
+For leakage / mis-segmentation scoring, open:
+
+- `notebooks/leakage-score-workflow.ipynb`
+
 ## 2) Implemented Workflows
 
-The notebook now includes two complementary workflows.
+The notebook includes three complementary workflows.
 
 ### A) Spatial sticky-gene discovery and correction
 
@@ -90,9 +94,33 @@ Stored outputs:
 - `adata.layers["stickiness_resid"]` (if `store_residuals=True`)
 - DataFrame `ctas_df` with ranking/statistical/diagnostic columns
 
+### C) Leakage / mis-segmentation scoring
+
+Backed by `leakage_score.py`, exposed via `tl.py`:
+
+- `tl.leakage_score(...)`
+- `tl.leakage_sanity_check(...)`
+- `tl.prepare_leakage_scatter(...)`
+
+Implemented features:
+
+- Source-specific eligibility via top cell-type mass fraction (`top1_frac`).
+- Source-cell-type set per gene (`sources`) from cumulative mass coverage.
+- Off-source burden metric (`off_type_frac`).
+- Presence-ratio band-pass score (`pr_score`) to suppress overly ubiquitous OFF detection.
+- Neighbor-based OFF proximity enrichment (`near_enrichment`) from `adata.obsp["connectivities"]`.
+- Proximity-aware low-count halo contrast (`spray_delta = spray_near - spray_far`).
+- Robust-z base score (`off_type_frac`, `near_enrichment`, `spray_delta`, `pr_score`) with specificity weighting (`top1_frac ** alpha`) to form `leakage_score`.
+
+Stored outputs:
+
+- `adata.varm["leakage"]` (structured per-gene results)
+- `adata.uns["leakage"]` (run parameters and summary metadata)
+
 ## 3) Key Data Requirements
 
 - `adata.obsm["spatial"]` is required for spatial-neighbor workflows.
+- `adata.obsp["connectivities"]` is required for directional leakage scoring.
 - `adata.obs["sample_id"]` is used for sample-aware neighbor building and tiled plotting.
 - `adata.obs["cell_type"]` is required for cell-type-adjusted stickiness.
 - `adata.obs["total_counts"]` is used for normalization and residualization; if missing, it is computed from the selected matrix.
